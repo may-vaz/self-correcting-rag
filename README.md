@@ -4,7 +4,7 @@ A robust, production-grade **Retrieval-Augmented Generation (RAG)** system with 
 
 ---
 
-## ✨ Key Features
+##  Key Features
 
 - **Self-Correcting Pipeline** — Automatically detects hallucinations and irrelevant answers, then retries or rewrites queries.
 - **Intelligent Retrieval** — Hybrid retrieval with **Cross-Encoder reranking** for higher relevance.
@@ -15,7 +15,7 @@ A robust, production-grade **Retrieval-Augmented Generation (RAG)** system with 
 
 ---
 
-## 🏗️ Architecture Overview
+##  Architecture Overview
 
 The system uses a **LangGraph** state machine with the following flow:
 
@@ -34,7 +34,7 @@ This creates a **reliable, self-healing RAG loop**.
 
 ---
 
-## 🛠️ Tech Stack
+##  Tech Stack
 
 | Component              | Technology                              |
 |------------------------|-----------------------------------------|
@@ -49,7 +49,7 @@ This creates a **reliable, self-healing RAG loop**.
 
 ---
 
-## 📋 Installation & Setup
+##  Installation & Setup
 
 ### 1. Clone & Setup Environment
 
