@@ -1,3 +1,8 @@
+"""
+Self-correcting RAG LangGraph workflow, with an input_guard node running
+first: a dedicated prompt-injection classifier (ProtectAI) plus Llama Guard
+(content safety) screen every query before it reaches the retriever.
+"""
 from typing import List, Optional
 from typing_extensions import TypedDict
 from langchain_core.prompts import PromptTemplate
@@ -9,15 +14,17 @@ from langgraph.graph import END, StateGraph
 from sentence_transformers import CrossEncoder
 import warnings
 
+from guardrails import check_input_safety
+
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-MAX_RETRIES      = 3          # hard cap on retrieve→grade→transform loops
-RELEVANCE_THRESHOLD = 0.3    # cross-encoder score below this → discard chunk
-TOP_K_RETRIEVAL  = 6         # fetch more chunks; reranker will prune them down
-TOP_K_AFTER_RANK = 3         # keep only the top-N after reranking
+MAX_RETRIES          = 3     # hard cap on retrieve→grade→transform loops
+RELEVANCE_THRESHOLD  = 0.3   # cross-encoder score below this → discard chunk
+TOP_K_RETRIEVAL      = 6     # fetch more chunks; reranker will prune them down
+TOP_K_AFTER_RANK     = 3     # keep only the top-N after reranking
 
 # ─────────────────────────────────────────────
 # 1. GRAPH STATE
@@ -26,8 +33,10 @@ class GraphState(TypedDict):
     question:    str
     generation:  str
     documents:   List[Document]
-    sources:     List[str]          # NEW – citations carried through graph
-    iterations:  int                # NEW – loop counter
+    sources:     List[str]
+    iterations:  int
+    blocked:     bool
+    block_reason: Optional[List[str]]
 
 
 # ─────────────────────────────────────────────
@@ -40,7 +49,6 @@ embeddings  = OllamaEmbeddings(model="nomic-embed-text")
 vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
 retriever   = vectorstore.as_retriever(search_kwargs={"k": TOP_K_RETRIEVAL})
 
-# Cross-encoder reranker (runs locally via sentence-transformers)
 cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
@@ -58,26 +66,45 @@ def _extract_source(doc: Document) -> str:
 # 4. NODE FUNCTIONS
 # ─────────────────────────────────────────────
 
+def input_guard(state: GraphState) -> GraphState:
+    """First node in the graph. Screens the raw user query through two local
+    layers before anything touches the retriever or an LLM: a dedicated
+    prompt-injection classifier (ProtectAI), and Llama Guard for harmful
+    content. This is the mitigation for OWASP LLM01 (Prompt Injection) —
+    see docs/owasp_compliance.md."""
+    print("---INPUT GUARDRAIL (injection classifier + Llama Guard)---")
+    question = state["question"]
+    result = check_input_safety(question)
+
+    if result["flagged"]:
+        print(f"  BLOCKED — layer: {result['layer']}")
+        return {
+            **state,
+            "blocked": True,
+            "block_reason": [result["layer"]] if result["layer"] else [],
+            "generation": "This query was blocked by the input safety guardrail "
+                           "(looked like a prompt injection, jailbreak, or unsafe request).",
+            "sources": [],
+            "documents": [],
+        }
+
+    print("  Passed guardrail check")
+    return {**state, "blocked": False, "block_reason": None}
+
+
 def retrieve(state: GraphState) -> GraphState:
     print("---RETRIEVAL---")
     question  = state["question"]
     raw_docs  = retriever.invoke(question)
 
-    # ── Cross-encoder reranking ──────────────────────────────────────────
     if raw_docs:
         pairs  = [(question, d.page_content) for d in raw_docs]
-        scores = cross_encoder.predict(pairs)           # float32 array
+        scores = cross_encoder.predict(pairs)
         ranked = sorted(zip(scores, raw_docs), key=lambda x: x[0], reverse=True)
 
-        # Apply threshold & keep top-K
-        docs = [
-            doc for score, doc in ranked
-            if score >= RELEVANCE_THRESHOLD
-        ][:TOP_K_AFTER_RANK]
+        docs = [doc for score, doc in ranked if score >= RELEVANCE_THRESHOLD][:TOP_K_AFTER_RANK]
 
         if not docs:
-            # Nothing passed threshold – keep the single best anyway so the
-            # grader can decide, rather than triggering an immediate rewrite
             docs = [ranked[0][1]]
 
         print(f"  Retrieved {len(raw_docs)} chunks → {len(docs)} kept after reranking")
@@ -133,7 +160,7 @@ def generate(state: GraphState) -> GraphState:
     documents = state["documents"]
 
     context = "\n\n".join(doc.page_content for doc in documents)
-    sources = list({_extract_source(d) for d in documents})   # deduplicated
+    sources = list({_extract_source(d) for d in documents})
 
     prompt = PromptTemplate(
         template="""You are an assistant for question-answering tasks.
@@ -175,7 +202,7 @@ Return JSON with a single key 'question' containing the rewritten question.""",
     )
     chain = prompt | llm | JsonOutputParser()
     try:
-        response      = chain.invoke({"question": question})
+        response = chain.invoke({"question": question})
         better_question = response.get("question", question)
     except Exception:
         better_question = question
@@ -187,6 +214,10 @@ Return JSON with a single key 'question' containing the rewritten question.""",
 # ─────────────────────────────────────────────
 # 5. CONDITIONAL EDGES
 # ─────────────────────────────────────────────
+
+def route_after_guard(state: GraphState) -> str:
+    return "blocked" if state.get("blocked") else "proceed"
+
 
 def decide_to_generate(state: GraphState) -> str:
     print("---ROUTING: enough relevant docs?---")
@@ -217,14 +248,12 @@ def grade_generation(state: GraphState) -> str:
     generation = state["generation"]
     iterations = state.get("iterations", 0)
 
-    # Hard stop – don't loop forever
     if iterations >= MAX_RETRIES:
         print(f"  MAX RETRIES reached – accepting answer as-is")
         return "useful"
 
     context = "\n\n".join(doc.page_content for doc in documents)
 
-    # ── Stage 1: hallucination grader ───────────────────────────────────
     hal_prompt = PromptTemplate(
         template="""You are checking whether an LLM answer is fully grounded in the
 provided facts. Answer 'yes' only if EVERY claim in the answer can be traced
@@ -244,7 +273,7 @@ Return JSON with a single key 'score' whose value is 'yes' or 'no'.""",
         )
         grounded = hal_score.get("score", "yes").lower() == "yes"
     except Exception:
-        grounded = True   # default to pass on parse error
+        grounded = True
 
     if not grounded:
         print("  HALLUCINATION detected → retry generate")
@@ -252,7 +281,6 @@ Return JSON with a single key 'score' whose value is 'yes' or 'no'.""",
 
     print("  Answer is grounded – checking relevance …")
 
-    # ── Stage 2: answer relevance grader ────────────────────────────────
     ans_prompt = PromptTemplate(
         template="""Does the answer below fully address the question?
 Question: {question}
@@ -282,12 +310,20 @@ Return JSON with a single key 'score' whose value is 'yes' or 'no'.""",
 # ─────────────────────────────────────────────
 workflow = StateGraph(GraphState)
 
+workflow.add_node("input_guard",      input_guard)
 workflow.add_node("retrieve",         retrieve)
 workflow.add_node("grade_documents",  grade_documents)
 workflow.add_node("generate",         generate)
 workflow.add_node("transform_query",  transform_query)
 
-workflow.set_entry_point("retrieve")
+workflow.set_entry_point("input_guard")
+
+workflow.add_conditional_edges(
+    "input_guard",
+    route_after_guard,
+    {"blocked": END, "proceed": "retrieve"},
+)
+
 workflow.add_edge("retrieve", "grade_documents")
 
 workflow.add_conditional_edges(
@@ -302,9 +338,9 @@ workflow.add_conditional_edges(
     "generate",
     grade_generation,
     {
-        "not_supported": "generate",       # hallucination → retry
-        "useful":        END,              # good answer → done
-        "not_useful":    "transform_query",# wrong answer → rewrite query
+        "not_supported": "generate",
+        "useful":        END,
+        "not_useful":    "transform_query",
     },
 )
 

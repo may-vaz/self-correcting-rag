@@ -27,14 +27,19 @@ def main():
         try:
             state = run_query(user_query)
             print("=" * 60)
-            print("\nANSWER:")
-            print(state.get("generation", "No answer generated."))
 
-            sources = state.get("sources", [])
-            if sources:
-                print("\nSOURCES:")
-                for s in sources:
-                    print(f"  • {s}")
+            if state.get("blocked"):
+                print("\n🛑 BLOCKED BY INPUT GUARDRAIL")
+                print(f"   Reason: {state.get('block_reason')}")
+            else:
+                print("\nANSWER:")
+                print(state.get("generation", "No answer generated."))
+
+                sources = state.get("sources", [])
+                if sources:
+                    print("\nSOURCES:")
+                    for s in sources:
+                        print(f"  • {s}")
             print("\n" + "=" * 60)
 
         except Exception as e:
