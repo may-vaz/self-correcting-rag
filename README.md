@@ -1,4 +1,4 @@
-# Self-Correcting RAG System for Rose Gardening Knowledge
+# Self-Correcting RAG System for Gardening Knowledge
 
 A robust, production-grade **Retrieval-Augmented Generation (RAG)** system with self-correction capabilities, built for accurate question-answering over PDF documents (rose cultivation guides).
 
