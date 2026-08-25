@@ -55,7 +55,7 @@ red-team test results, and design decisions: [`docs/owasp_compliance.md`](docs/o
 | **LLM**                | Llama 3 / Llama 3.1 (via Ollama)         |
 | **Embeddings**         | `nomic-embed-text` (Ollama)              |
 | **Vector Store**       | ChromaDB                                 |
-| **Framework**          | LangChain + **LangGraph**                |
+| **Framework**          | LangChain + LangGraph                |
 | **Reranker**           | `cross-encoder/ms-marco-MiniLM-L-6-v2`   |
 | **Input Guardrails**   | ProtectAI injection classifier + Llama Guard 3 |
 | **Document Loader**    | PyPDFDirectoryLoader                     |
